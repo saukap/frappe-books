@@ -28,12 +28,6 @@ info="$(pilot dev info)"
 bench_path="$(sed -n 's/^Bench .*(\(.*\))$/\1/p' <<<"$info")"
 site_url="$(awk '$1 == "Site" {print $2}' <<<"$info")"
 site="$(sed -E 's|^https?://([^:/]+).*|\1|' <<<"$site_url")"
-site_port="$(sed -E 's|.*:([0-9]+)/?$|\1|' <<<"$site_url")"
-service_port="$(awk '$1 == "port:" {print $2; exit}' .amp/services.yaml)"
-if [[ "$site_port" != "$service_port" ]]; then
-	echo "Pilot serves $site_url, but .amp/services.yaml expects port $service_port. Update port: there." >&2
-	exit 1
-fi
 
 step "Seed $site for the browser tests"
 seed_marker="$bench_path/sites/$site/.amp-books-seeded"
@@ -67,7 +61,7 @@ $begin
 
 - Develop with Pilot, not bench. \`.agents/setup\` ran \`pilot dev setup\`, which created bench \`$bench_path\` (Frappe develop, SQLite) with this checkout linked as \`apps/frappe_books\`. Pilot commands run inside the checkout find that bench; \`pilot dev info\` shows it. Run \`pilot dev setup\` again after pulling or changing DocTypes or requirements: it installs requirements, migrates, and rebuilds assets.
 - Site \`$site\` is the default site, with the Books setup wizard completed (company "Books UI Tests"). Log in as \`Administrator\` / \`admin\`. Run Frappe commands with \`pilot frappe --site $site <command>\`.
-- \`amp orb services ensure\` runs \`pilot dev start\` (Redis, the web server on port $site_port with realtime and background jobs, and the frontend \`dev\` script) and prints the portal URL. The Books UI is at \`/books\`. After frontend changes, run \`yarn build\` in \`frontend/\` so \`/books\` serves them.
+- \`amp orb services ensure\` runs \`pilot dev start\`: Redis, the Frappe web server at $site_url, and the Vite dev server on port 6969. It prints the portal URL, which opens \`/books/\` on the Vite dev server with hot reload; Vite proxies every other path to the site. The web server's own \`/books\` serves the last \`yarn build\` from \`frontend/\`.
 - Checks: \`yarn lint\`, \`yarn typecheck\`, and \`yarn test\` in \`frontend/\`; \`pilot frappe --site $site run-tests --app frappe_books\`; \`BOOKS_TEST_URL=$site_url yarn test:ui\` in \`frontend/\` with the service running.
 $end
 EOF
