@@ -2,7 +2,12 @@ import vue from '@vitejs/plugin-vue';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { defineConfig, type Plugin } from 'vite';
+import {
+  defineConfig,
+  type ModuleNode,
+  type Plugin,
+  type ViteDevServer,
+} from 'vite';
 
 const frontendRoot = __dirname;
 const appRoot = path.resolve(frontendRoot, '..');
@@ -29,6 +34,55 @@ const siteName = process.env.BOOKS_SITE_URL
   ? siteUrl.hostname
   : (commonSiteConfig.default_site ?? 'localhost');
 const siteHeaders = { 'X-Frappe-Site-Name': siteName };
+
+// The browser finds a module's imports only after fetching it, so it loads the app in
+// waves, and each wave waits a full round trip. Through a remote proxy, such as an
+// Amp orb portal, that takes seconds per page load. Preload every module the dev
+// server has seen in the app's graph so the browser requests them all at once.
+async function preloadLinks(server: ViteDevServer) {
+  const modules = new Set<ModuleNode>();
+  const entry = await server.moduleGraph.getModuleByUrl('/src/web/main.ts');
+  // The graph names the client differently from its <script> tag; take its imports.
+  const client = await server.moduleGraph.getModuleByUrl('/@vite/client');
+  const pending = [
+    ...(entry ? [entry] : []),
+    ...(client?.importedModules ?? []),
+  ];
+  for (let module = pending.pop(); module; module = pending.pop()) {
+    if (modules.has(module)) continue;
+    modules.add(module);
+    pending.push(...module.importedModules);
+  }
+  return [...modules]
+    .flatMap((module) => {
+      const [pathname, query] = module.url.split('?');
+      // Vite puts `t` first in imports of hot-updated modules; match its URL exactly.
+      if (module.lastHMRTimestamp) {
+        return [
+          `${pathname}?t=${module.lastHMRTimestamp}${query ? `&${query}` : ''}`,
+        ];
+      }
+      // A package file imported by name carries Vite's `v` query, but the package's
+      // relative imports of the same file, as in frappe-ui, do not. The graph keeps one
+      // URL per file, so preload both.
+      const unversioned = query?.replace(/(^|&)v=[^&]*/, '').replace(/^&/, '');
+      if (
+        query === undefined ||
+        unversioned === query ||
+        pathname.startsWith('/node_modules/.vite/')
+      ) {
+        return [module.url];
+      }
+      return [
+        module.url,
+        unversioned ? `${pathname}?${unversioned}` : pathname,
+      ];
+    })
+    .map(
+      (url) => `<link rel="modulepreload" href="${path.posix.join(base, url)}">`
+    )
+    .join('');
+}
 
 // Frappe renders /books from the built index.html with the session's boot data. Serve
 // that page with the dev entry in place of the built bundle.
@@ -70,7 +124,8 @@ function booksPage(): Plugin {
               // Not transformIndexHtml: it would prefix `base` to Frappe's own script URLs.
               html = html.replace(
                 builtEntry,
-                `<script type="module" src="${base}@vite/client"></script>` +
+                (await preloadLinks(server)) +
+                  `<script type="module" src="${base}@vite/client"></script>` +
                   `<script type="module" src="${base}src/web/main.ts"></script>`
               );
               const pageHeaders = { ...page.headers };
@@ -138,6 +193,8 @@ export default defineConfig(async () => {
     },
     server: {
       port: 6969,
+      // Builds the module graph at startup, so the first page load gets its preloads.
+      warmup: { clientFiles: ['./src/web/main.ts'] },
       // Hosts such as Amp orb portals set this for Vite 6, which reads it itself.
       allowedHosts:
         process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS?.split(','),
