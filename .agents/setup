@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Sets up this checkout with Pilot, which the orb image provides: a dev bench on Frappe develop
+# with a SQLite site, the Books setup wizard completed, and Chromium for the Playwright tests.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+	printf '\n==> %s\n' "$*"
+	SECONDS=0
+}
+done_step() { printf '    (%ss)\n' "$SECONDS"; }
+
+step "Pilot"
+if ! command -v pilot >/dev/null; then
+	echo "pilot is not on PATH. The orb image should provide it in ~/pilot/bin." >&2
+	exit 1
+fi
+pilot --version
+done_step
+
+step "pilot dev setup"
+pilot -y dev setup
+done_step
+
+info="$(pilot dev info)"
+bench_path="$(sed -n 's/^Bench .*(\(.*\))$/\1/p' <<<"$info")"
+site_url="$(awk '$1 == "Site" {print $2}' <<<"$info")"
+site="$(sed -E 's|^https?://([^:/]+).*|\1|' <<<"$site_url")"
+site_port="$(sed -E 's|.*:([0-9]+)/?$|\1|' <<<"$site_url")"
+service_port="$(awk '$1 == "port:" {print $2; exit}' .amp/services.yaml)"
+if [[ "$site_port" != "$service_port" ]]; then
+	echo "Pilot serves $site_url, but .amp/services.yaml expects port $service_port. Update port: there." >&2
+	exit 1
+fi
+
+step "Seed $site for the browser tests"
+seed_marker="$bench_path/sites/$site/.amp-books-seeded"
+if [[ ! -f "$seed_marker" ]]; then
+	pilot frappe --site "$site" set-config allow_tests 1 --parse
+	pilot frappe --site "$site" execute frappe.db.set_single_value --args '["Books Setup Wizard", {
+		"company_name": "Books UI Tests", "fullname": "Administrator", "email": "admin@example.com",
+		"country": "India", "currency": "INR", "bank_name": "UI Test Bank", "chart_of_accounts": "Standard Chart of Accounts",
+		"fiscal_year_start": "2026-04-01", "fiscal_year_end": "2027-03-31"}]'
+	pilot frappe --site "$site" execute \
+		frappe_books.frappe_books.doctype.books_setup_wizard.books_setup_wizard.complete_setup
+	touch "$seed_marker"
+fi
+done_step
+
+step "Playwright Chromium"
+(cd frontend && yarn --silent playwright install --only-shell chromium)
+done_step
+
+step "Orb agent guidance"
+guidance_file="$HOME/.config/amp/AGENTS.md"
+begin="<!-- frappe-books orb setup: begin -->"
+end="<!-- frappe-books orb setup: end -->"
+mkdir -p "$(dirname "$guidance_file")"
+touch "$guidance_file"
+awk -v begin="$begin" -v end="$end" '$0 == begin {skip = 1} !skip {print} $0 == end {skip = 0}' \
+	"$guidance_file" >"$guidance_file.tmp"
+cat >>"$guidance_file.tmp" <<EOF
+$begin
+# Frappe Books orb
+
+- Develop with Pilot, not bench. \`.agents/setup\` ran \`pilot dev setup\`, which created bench \`$bench_path\` (Frappe develop, SQLite) with this checkout linked as \`apps/frappe_books\`. Pilot commands run inside the checkout find that bench; \`pilot dev info\` shows it. Run \`pilot dev setup\` again after pulling or changing DocTypes or requirements: it installs requirements, migrates, and rebuilds assets.
+- Site \`$site\` is the default site, with the Books setup wizard completed (company "Books UI Tests"). Log in as \`Administrator\` / \`admin\`. Run Frappe commands with \`pilot frappe --site $site <command>\`.
+- \`amp orb services ensure\` runs \`pilot dev start\` (Redis, the web server on port $site_port with realtime and background jobs, and the frontend \`dev\` script) and prints the portal URL. The Books UI is at \`/books\`. After frontend changes, run \`yarn build\` in \`frontend/\` so \`/books\` serves them.
+- Checks: \`yarn lint\`, \`yarn typecheck\`, and \`yarn test\` in \`frontend/\`; \`pilot frappe --site $site run-tests --app frappe_books\`; \`BOOKS_TEST_URL=$site_url yarn test:ui\` in \`frontend/\` with the service running.
+$end
+EOF
+mv "$guidance_file.tmp" "$guidance_file"
+done_step

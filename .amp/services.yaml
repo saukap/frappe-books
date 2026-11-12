@@ -1,0 +1,20 @@
+services:
+  books:
+    # `pilot dev start` runs Redis, the Frappe web server (with realtime and background jobs), and
+    # the frontend `dev` script for the bench that `.agents/setup` created with `pilot dev setup`.
+    # Frappe picks the site from the Host header, so link the portal's hostname to the site first,
+    # as Pilot's docs/development-proxies.md describes.
+    command: |
+      info="$(pilot dev info)"
+      bench_path="$(sed -n 's/^Bench .*(\(.*\))$/\1/p' <<<"$info")"
+      site="$(awk '$1 == "Site" {print $2}' <<<"$info" | sed -E 's|^https?://([^:/]+).*|\1|')"
+      host="${PUBLIC_URL#*://}"
+      host="${host%%[:/]*}"
+      if [[ -n "$host" && ! -e "$bench_path/sites/$host" && ! -L "$bench_path/sites/$host" ]]; then
+        ln -s "$site" "$bench_path/sites/$host"
+      fi
+      exec pilot dev start
+    port: 8001
+    health: /api/method/ping
+    portal:
+      title: Frappe Books

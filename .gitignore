@@ -44,6 +44,9 @@ frappe_books/www/books.html
 frontend/test-results/
 frontend/playwright-report/
 
+# Amp orb portal manifests
+.amp/portals/*
+
 # IDEs and editors
 .vscode/
 .vs/
